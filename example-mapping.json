@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "fields": [
+    {"Old table": "TEST_Fact_Form_CustomEventsCube", "Old column": "What type of fall?", "New table": "Fall Data", "New column": "What type of fall?"},
+    {"Old table": "TEST_Fact_Form_CustomEventsCube", "Old column": "Where was the fall?", "New table": "Fall Data", "New column": "Where was the fall?"},
+    {"Old table": "TEST_Fact_Form_CustomEventsCube", "Old column": "Wound Reason", "New table": "Wound Data", "New column": "Wound Reason"},
+    {"Old table": "TEST_Fact_Form_CustomEventsCube", "Old column": "Wound Type", "New table": "Wound Data", "New column": "Wound Type"}
+  ],
+  "booleans": []
+}
