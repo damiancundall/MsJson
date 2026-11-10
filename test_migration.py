@@ -4,7 +4,7 @@ import json
 import unittest
 import zipfile
 
-from migration import (build_bundle, detect_boolean_filters, expand_uploads, inventory, migrate,
+from migration import (build_bundle, dashboard_title, detect_boolean_filters, expand_uploads, inventory, migrate,
                        parse_dashboard, rules_from_rows)
 
 
@@ -193,6 +193,46 @@ class MigrationTests(unittest.TestCase):
         for raw in [b'{', b'[]', b'{"widgets":[],"widgets":[]}', b'{"widgets":[],"x":NaN}']:
             with self.assertRaises(ValueError):
                 parse_dashboard(raw)
+
+    def test_array_export_preserves_wrapper_and_report_paths(self):
+        source = [dashboard({'table': 'T', 'column': 'F', 'dim': '[T.F]',
+                             'filter': {'members': ['Yes', 'No']}})]
+        parsed = parse_dashboard(json.dumps(source).encode())
+        out, changes, issues = migrate(parsed, {('T', 'F'): ('New', 'Flag')})
+        self.assertIsInstance(out, list)
+        self.assertEqual(out[0]['oid'], 'keep-me')
+        self.assertEqual(out[0]['filters'][0]['jaql']['dim'], '[New.Flag]')
+        self.assertEqual(out[0]['filters'][0]['jaql']['filter']['members'], ['1', '0'])
+        self.assertTrue(all(c['path'].startswith('/0/') for c in changes))
+        self.assertEqual(dashboard_title(parsed), 'Test')
+        self.assertEqual(inventory(parsed)[0]['References'], 1)
+        self.assertFalse(issues)
+        self.assertFalse(migrate(out, {('T', 'F'): ('New', 'Flag')})[1])
+
+    def test_multi_dashboard_array_boolean_scope(self):
+        first = dashboard({'table': 'T', 'column': 'F', 'filter': {'members': ['True']}})
+        second = dashboard({'table': 'T', 'column': 'F', 'datatype': 'number', 'filter': {'members': [123]}})
+        out, _, _ = migrate(parse_dashboard(json.dumps([first, second]).encode()), {})
+        self.assertEqual(out[0]['filters'][0]['jaql']['filter']['members'], ['1'])
+        self.assertEqual(out[1], second)
+        self.assertEqual(dashboard_title(out), '2 dashboards in one export')
+
+    def test_array_issue_paths_and_invalid_elements(self):
+        source = [dashboard({'table': 'T', 'column': 'F', 'filter': {'members': ['Yes', 'Maybe']}})]
+        self.assertTrue(migrate(source, {})[2][0]['path'].startswith('/0/'))
+        for value in [[], [None], [{'widgets': {}}], [{'widgets': []}, {'title': 'Missing widgets'}]]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_dashboard(json.dumps(value).encode())
+
+    def test_array_zip_roundtrip(self):
+        raw = json.dumps([dashboard({'table': 'T', 'column': 'F', 'filter': {'members': ['No']}})]).encode()
+        out, changes, issues = migrate(parse_dashboard(raw), {})
+        result = {'name': 'array.dash', 'raw': raw, 'output': out, 'changes': changes, 'issues': issues}
+        with zipfile.ZipFile(io.BytesIO(build_bundle([result], {}))) as z:
+            self.assertEqual(z.read('originals/0001_array.dash'), raw)
+            migrated = parse_dashboard(z.read('migrated/0001_array.dash'))
+            self.assertIsInstance(migrated, list)
+            self.assertEqual(migrated[0]['filters'][0]['jaql']['filter']['members'], ['0'])
 
     def test_zip_duplicate_names_and_review_exclusion(self):
         raw = json.dumps(dashboard({'table': 'T', 'column': 'F'})).encode()

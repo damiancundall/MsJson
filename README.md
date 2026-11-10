@@ -21,6 +21,8 @@ In Streamlit's deployment form select repository `damiancundall/MsJson`, branch 
 
 ## Field mapping
 
+Both Sisense export formats are supported: a dashboard object `{...}` and an array of dashboard objects `[{...}]`. Outputs preserve the original structure, including single-dashboard array wrappers. Multi-dashboard arrays are processed with independent automatic boolean detection per dashboard. Every dashboard object must still contain a `widgets` array; malformed or empty exports are reported as Invalid.
+
 CSV headers or the Excel **Fields** sheet:
 
 ```csv

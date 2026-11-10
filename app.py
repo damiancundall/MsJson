@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from migration import (BOOL_COLUMNS, FIELD_COLUMNS, VERSION, build_bundle, csv_bytes,
-                       detect_boolean_filters, expand_uploads, inventory, migrate, parse_dashboard, rules_from_rows)
+                       dashboard_title, detect_boolean_filters, expand_uploads, inventory, migrate, parse_dashboard, rules_from_rows)
 
 st.set_page_config(page_title='Dashboard Migrator', page_icon='🔁', layout='wide')
 st.title('Dashboard Migrator')
@@ -60,6 +60,7 @@ with st.sidebar:
     st.caption('Batch limits: 1,000 dashboards · 20 MB per dashboard · 150 MB uncompressed total.')
 
 st.subheader('1. Dashboard files')
+st.caption('Accepts both a dashboard object and an array of dashboard objects. Each output keeps its original export format.')
 uploads = st.file_uploader('Upload .dash files or ZIP archives', type=['dash', 'zip'], accept_multiple_files=True)
 files = []
 try:
@@ -116,7 +117,7 @@ if st.button('Preview migration', type='primary', disabled=not files):
                         coverage[key] += entry['References']
                 output, changes, issues = migrate(original, mappings, boolean_rules)
                 r.update(output=output, changes=changes, issues=issues, detected_booleans=detections,
-                         title=original.get('title', ''), status='Review' if issues else ('Ready' if changes else 'Unchanged'))
+                         title=dashboard_title(original), status='Review' if issues else ('Ready' if changes else 'Unchanged'))
             except Exception as exc:
                 r['issues'] = [{'path': '/', 'message': str(exc)}]
             results.append(r)

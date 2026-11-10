@@ -30,9 +30,22 @@ def parse_dashboard(raw):
     if len(raw) > MAX_FILE:
         raise ValueError('Dashboard exceeds 20 MB.')
     data = json.loads(raw.decode('utf-8-sig'), object_pairs_hook=unique, parse_constant=invalid)
-    if not isinstance(data, dict) or not isinstance(data.get('widgets'), list):
-        raise ValueError('Expected a dashboard object with a widgets array.')
+    dashboards = data if isinstance(data, list) else [data]
+    if not dashboards:
+        raise ValueError('The dashboard export array is empty.')
+    for i, dashboard in enumerate(dashboards):
+        if not isinstance(dashboard, dict) or not isinstance(dashboard.get('widgets'), list):
+            location = f' at array index {i}' if isinstance(data, list) else ''
+            raise ValueError(f'Expected a dashboard object with a widgets array{location}.')
     return data
+
+
+def dashboard_title(data):
+    if isinstance(data, list):
+        if len(data) == 1:
+            return data[0].get('title', '')
+        return f'{len(data)} dashboards in one export'
+    return data.get('title', '')
 
 
 def rules_from_rows(fields, booleans):
@@ -136,6 +149,16 @@ def detect_boolean_filters(data):
 
 def migrate(data, mappings, bools=None, auto_booleans=True):
     """Decisions always use original input, never already transformed values."""
+    if isinstance(data, list):
+        # Preserve Sisense's array export format, processing each dashboard in its
+        # own scope so inferred boolean rules cannot leak between datasources.
+        outputs, changes, issues = [], [], []
+        for i, dashboard in enumerate(data):
+            output, item_changes, item_issues = migrate(dashboard, mappings, bools, auto_booleans)
+            outputs.append(output)
+            changes.extend([{**c, 'path': f'/{i}' + c['path']} for c in item_changes])
+            issues.extend([{**v, 'path': f'/{i}' + v['path']} for v in item_issues])
+        return outputs, changes, issues
     inferred = {(r['Old table'], r['Old column']): ('Yes', 'No')
                 for r in detect_boolean_filters(data)} if auto_booleans else {}
     bools = {**inferred, **(bools or {})}
