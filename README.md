@@ -1,7 +1,7 @@
 # MsJson
 
 
-A Streamlit app for batch editing exported Sisense `.dash` JSON files. Upload individual dashboards or ZIPs, supply field and boolean rules, preview, and download a ZIP of originals, migrated dashboards and reports. There is no Sisense upload or credential handling.
+A Streamlit app for batch editing exported Sisense `.dash` JSON files. Upload individual dashboards or ZIPs, optionally supply field mappings, preview, and download a ZIP of originals, migrated dashboards and reports. Fields with Yes/No, True/False strings or JSON boolean filter members are detected and converted automatically from JAQL. There is no Sisense upload or credential handling.
 
 ## Run on Windows
 
@@ -35,14 +35,18 @@ Match the exact names exposed by the Sisense datasource, including case and spac
 
 ## Boolean-to-string rules
 
-Excel **Booleans** sheet (or enter directly in the app):
+**Boolean filter conversion is automatic. No boolean list, mapping library or field move is required.** Upload dashboards and click Preview migration. The preview lists each detected field, its dashboard, filter path and matching members; the ZIP report retains that evidence.
+
+The app finds field-scoped JAQL filter members equal to Yes, No, True or False (case-insensitive), including single selections, include/exclude, nested and/or, widget filters and formula context filters. Actual JSON true/false members also qualify, without requiring a declared datatype. Yes, True and JSON true become **"1"**; No, False and JSON false become **"0"**. It uses the original table/column identity to set matching field references to `datatype: "text"`, including when the field is also moved. Detection is local to each dashboard so similarly named fields in other dashboards do not inherit an inferred rule. Dashboard titles, scripts, orphan member lists, All-only filters, bare 1/0 values and text such as "True story" are not evidence for automatic detection.
+
+An optional Excel **Booleans** sheet (or the collapsed custom-label editor) supports custom labels and existing saved overrides:
 
 ```csv
 Old table,Old column,Yes member,No member
 TEST_Fact_Form_CustomEventsCube,Example boolean question,Yes,No
 ```
 
-Identify booleans by their ORIGINAL table/column, even when they also move. Only those fields get JAQL `datatype: "text"`. Their filter `members` are converted within include/exclude and nested and/or structures, as are scalar `equals` and `doesntEqual` conditions. Yes/No matching ignores case; custom labels are allowed. Actual JSON true/false and numeric 1/0 also become strings. Outputs are **"1" and "0"**, not numbers. Existing string 1/0 are unchanged. Null and empty strings stay null/empty; they never become false. Nested JAQL objects use their own field identities.
+Identify overrides by ORIGINAL table/column, even when they also move. Overrides take precedence over automatic labels. Once a field is identified, its filter `members` are converted within include/exclude and nested and/or structures, as are scalar `equals` and `doesntEqual` conditions. Actual JSON true/false and numeric 1/0 also become strings. Existing string 1/0 are unchanged. Null and empty strings stay null/empty; they never become false. Nested JAQL objects use their own field identities. Saved libraries from the original version remain compatible.
 
 Unsupported filter conditions, unfamiliar boolean members, boolean measures/formulas, inconsistent dimensions and references inside unsupported string properties trigger Review status. No guessing is done for those cases. Scripts are never executed. Other boolean-like fields are untouched.
 

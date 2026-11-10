@@ -10,6 +10,7 @@ import zipfile
 
 FIELD_COLUMNS = ['Old table', 'Old column', 'New table', 'New column']
 BOOL_COLUMNS = ['Old table', 'Old column', 'Yes member', 'No member']
+BOOLEAN_STRINGS = {'yes': '1', 'no': '0', 'true': '1', 'false': '0'}
 VERSION = 1
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 150 * 1024 * 1024
@@ -80,8 +81,64 @@ def inventory(data):
     return [{'Old table': k[0], 'Old column': k[1], 'References': v} for k, v in sorted(result.items())]
 
 
-def migrate(data, mappings, bools):
+def detect_boolean_filters(data):
+    """Find evidence inside field-scoped filters, never in labels or scripts.
+
+    Detection stays local to each dashboard. A matching table/column in another
+    dashboard may belong to a different datasource and must not inherit a rule.
+    """
+    detections = []
+
+    def members(node, path):
+        if isinstance(node, dict):
+            if 'jaql' in node or ('table' in node and 'column' in node):
+                return
+            for key, value in node.items():
+                p = path + '/' + str(key)
+                if key == 'members' and isinstance(value, list):
+                    yield p, value
+                elif key in ('equals', 'doesntEqual') and not isinstance(value, (dict, list)):
+                    yield p, [value]
+                elif isinstance(value, (dict, list)):
+                    yield from members(value, p)
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                yield from members(value, path + '/' + str(i))
+
+    def inspect(jaql, filt, path):
+        table, column = jaql.get('table'), jaql.get('column')
+        if not isinstance(table, str) or not isinstance(column, str):
+            return
+        for p, values in members(filt, path):
+            evidence = [v for v in values if
+                        (isinstance(v, str) and v.casefold() in BOOLEAN_STRINGS) or
+                        isinstance(v, bool)]
+            if evidence:
+                detections.append({'Old table': table, 'Old column': column,
+                                   'Filter path': p, 'Members': evidence})
+
+    def walk(node, path=''):
+        if isinstance(node, dict):
+            if 'filter' in node:
+                if 'table' in node and 'column' in node:
+                    inspect(node, node['filter'], path + '/filter')
+                elif isinstance(node.get('jaql'), dict):
+                    inspect(node['jaql'], node['filter'], path + '/filter')
+            for key, value in node.items():
+                walk(value, path + '/' + str(key))
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, path + '/' + str(i))
+
+    walk(data)
+    return detections
+
+
+def migrate(data, mappings, bools=None, auto_booleans=True):
     """Decisions always use original input, never already transformed values."""
+    inferred = {(r['Old table'], r['Old column']): ('Yes', 'No')
+                for r in detect_boolean_filters(data)} if auto_booleans else {}
+    bools = {**inferred, **(bools or {})}
     out = copy.deepcopy(data)
     changes, issues = [], []
     tokens = {dimension(k): dimension(v) for k, v in mappings.items() if k != v}
@@ -121,6 +178,8 @@ def migrate(data, mappings, bools):
                 return '1'
             if value.casefold() == no.casefold():
                 return '0'
+            if value.casefold() in BOOLEAN_STRINGS:
+                return BOOLEAN_STRINGS[value.casefold()]
         elif isinstance(value, bool):
             return '1' if value else '0'
         elif isinstance(value, (int, float)) and value in (0, 1):

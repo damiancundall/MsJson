@@ -6,11 +6,11 @@ import pandas as pd
 import streamlit as st
 
 from migration import (BOOL_COLUMNS, FIELD_COLUMNS, VERSION, build_bundle, csv_bytes,
-                       expand_uploads, inventory, migrate, parse_dashboard, rules_from_rows)
+                       detect_boolean_filters, expand_uploads, inventory, migrate, parse_dashboard, rules_from_rows)
 
 st.set_page_config(page_title='Dashboard Migrator', page_icon='🔁', layout='wide')
 st.title('Dashboard Migrator')
-st.write('Move field references and convert selected boolean filters across a batch of Sisense dashboards.')
+st.write('Move field references and automatically convert Yes/No and True/False filters across a batch of Sisense dashboards.')
 st.caption('Files are processed in memory on the machine hosting this app. Download results to retain them. No Sisense connection is required.')
 
 def records(frame):
@@ -26,7 +26,7 @@ if 'fields' not in st.session_state:
 
 with st.sidebar:
     st.header('Mapping library')
-    st.write('Load a saved configuration, a CSV of field mappings, or an Excel workbook with Fields and Booleans sheets.')
+    st.write('Load saved field mappings from JSON, CSV or the Fields sheet of an Excel workbook. Yes/No and True/False filters are detected automatically; the Booleans sheet is optional for custom labels.')
     library = st.file_uploader('Import mapping library', type=['json', 'csv', 'xlsx'])
     if st.button('Load library', disabled=library is None):
         try:
@@ -34,7 +34,7 @@ with st.sidebar:
                 config = json.loads(library.getvalue().decode('utf-8-sig'))
                 if config.get('version') != VERSION:
                     raise ValueError('Unsupported configuration version.')
-                fields, booleans = config['fields'], config['booleans']
+                fields, booleans = config.get('fields', []), config.get('booleans', [])
             elif library.name.lower().endswith('.csv'):
                 df = pd.read_csv(io.BytesIO(library.getvalue()), dtype=str, keep_default_na=False)
                 if not set(FIELD_COLUMNS).issubset(df.columns):
@@ -85,11 +85,13 @@ with st.expander('Discover fields in uploaded dashboards'):
 st.subheader('2. Field mappings')
 st.caption('Exact Sisense table/column names. Every matching reference is migrated, including nested JAQL, filters, field IDs and formula dimension tokens. Custom display titles are retained.')
 fields = records(st.data_editor(frame(st.session_state.fields, FIELD_COLUMNS), num_rows='dynamic', width='stretch', key=f'fields_{st.session_state.revision}'))
-st.subheader('3. Boolean fields becoming strings')
-st.write('Identify fields using their original table and column, even if they also move. Matching Yes/No members become the strings "1"/"0" and their JAQL datatype becomes text.')
-st.caption('Enter Yes and No as the member labels, or your own labels. Actual JSON true/false and numeric 1/0 are also converted. Empty and null members are preserved.')
-bools = records(st.data_editor(frame(st.session_state.booleans, BOOL_COLUMNS), num_rows='dynamic', width='stretch', key=f'bools_{st.session_state.revision}'))
-config = {'version': VERSION, 'fields': fields, 'booleans': bools}
+st.subheader('3. Automatic boolean conversion')
+st.write('No boolean mapping list is needed. The app detects Yes/No, True/False strings and JSON true/false members in JAQL filters, including dashboard, widget and nested filters. Yes/True becomes "1", No/False becomes "0", and matching field references become text.')
+st.caption('Detection is case-insensitive and works with a single selected value. Blank/null members are preserved. Unfamiliar members are flagged for review.')
+with st.expander('Optional: custom boolean labels / existing overrides'):
+    st.caption('Only needed for labels such as Enabled/Disabled. Use original table/column names. Saved libraries from the earlier version still work.')
+    bools = records(st.data_editor(frame(st.session_state.booleans, BOOL_COLUMNS), num_rows='dynamic', width='stretch', key=f'bools_{st.session_state.revision}'))
+config = {'version': VERSION, 'fields': fields, 'booleans': bools, 'automatic_boolean_filters': True}
 st.download_button('Save mapping library', json.dumps(config, indent=2), 'mapping-config.json', 'application/json')
 
 fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode() + b''.join(name.encode() + hashlib.sha256(raw).digest() for name, raw in files)).hexdigest()
@@ -98,26 +100,29 @@ st.caption('IDs, layout and scripts are preserved. Unrecognised filter condition
 if st.button('Preview migration', type='primary', disabled=not files):
     try:
         mappings, boolean_rules = rules_from_rows(fields, bools)
-        if not mappings and not boolean_rules:
-            raise ValueError('Add at least one field mapping or boolean field.')
         results = []
+        detected = []
         coverage = {key: 0 for key in set(mappings) | set(boolean_rules)}
         progress = st.progress(0)
         for i, (name, raw) in enumerate(files):
             r = {'name': name, 'raw': raw, 'changes': [], 'issues': [], 'output': None, 'status': 'Invalid'}
             try:
                 original = parse_dashboard(raw)
+                detections = detect_boolean_filters(original)
+                detected.extend([{'Dashboard': name, **d} for d in detections])
                 for entry in inventory(original):
                     key = (entry['Old table'], entry['Old column'])
                     if key in coverage:
                         coverage[key] += entry['References']
                 output, changes, issues = migrate(original, mappings, boolean_rules)
-                r.update(output=output, changes=changes, issues=issues, title=original.get('title', ''), status='Review' if issues else ('Ready' if changes else 'Unchanged'))
+                r.update(output=output, changes=changes, issues=issues, detected_booleans=detections,
+                         title=original.get('title', ''), status='Review' if issues else ('Ready' if changes else 'Unchanged'))
             except Exception as exc:
                 r['issues'] = [{'path': '/', 'message': str(exc)}]
             results.append(r)
             progress.progress((i + 1) / len(files))
         st.session_state.preview = {'fingerprint': fingerprint, 'results': results, 'config': config,
+                                    'detected_booleans': detected,
                                     'coverage': [{'Old table': k[0], 'Old column': k[1], 'Matched references': v} for k, v in sorted(coverage.items())]}
     except Exception as exc:
         st.error(str(exc))
@@ -127,6 +132,12 @@ if preview and preview['fingerprint'] != fingerprint:
     st.info('Files or mappings have changed. Run Preview migration again for current results.')
 elif preview:
     results = preview['results']
+    detected = preview.get('detected_booleans', [])
+    st.write(f'Automatically detected {len(set((d["Dashboard"], d["Old table"], d["Old column"]) for d in detected))} field(s) with Yes/No, True/False or JSON boolean filter members.')
+    if detected:
+        st.dataframe([{**d, 'Members': json.dumps(d['Members'], ensure_ascii=False)} for d in detected], width='stretch')
+    else:
+        st.caption('No Yes/No, True/False or JSON boolean filter members found. Fields with only All, blanks or 1/0 members are not inferred from their labels.')
     with st.expander('Mapping coverage'):
         st.dataframe(preview['coverage'], width='stretch')
         if any(r['Matched references'] == 0 for r in preview['coverage']):
