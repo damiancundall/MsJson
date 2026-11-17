@@ -13,6 +13,82 @@ def dashboard(jaql, **extra):
 
 
 class MigrationTests(unittest.TestCase):
+    def test_title_mentions_in_filter_widget_and_table_heading(self):
+        old = {'table': 'Old Table', 'column': 'Old Question', 'dim': '[Old Table.Old Question]',
+               'title': 'Count of Old Question', 'columnTitle': 'Old Question', 'tableTitle': 'Old Table',
+               'filter': {'members': ['Old Question']}}
+        source = dashboard(copy.deepcopy(old), title='Filter: Old Question')
+        source['title'] = 'Old Question overview'
+        source['widgets'] = [{'title': 'Old Question by month', 'metadata': {'panels': [{'items': [{
+            'title': 'Selected Old Question', 'jaql': copy.deepcopy(old),
+            'field': {'id': '[Old Table.Old Question]', 'title': 'Old Question heading'}}]}]}}]
+        out, changes, issues = migrate(source, {('Old Table', 'Old Question'): ('New Table', 'New Question')})
+        self.assertEqual(out['title'], 'New Question overview')
+        self.assertEqual(out['filters'][0]['title'], 'Filter: New Question')
+        self.assertEqual(out['widgets'][0]['title'], 'New Question by month')
+        item = out['widgets'][0]['metadata']['panels'][0]['items'][0]
+        self.assertEqual(item['title'], 'Selected New Question')
+        self.assertEqual(item['field']['title'], 'New Question heading')
+        self.assertEqual(item['jaql']['title'], 'Count of New Question')
+        self.assertEqual(item['jaql']['tableTitle'], 'New Table')
+        self.assertEqual(item['jaql']['filter']['members'], ['Old Question'])
+        self.assertTrue(any(c['reason'] == 'title mapping' for c in changes))
+        self.assertFalse(issues)
+
+    def test_title_context_distinguishes_same_named_columns(self):
+        source = dashboard({'table': 'A', 'column': 'Status', 'title': 'Status'})
+        source['filters'].append({'jaql': {'table': 'B', 'column': 'Status', 'title': 'Status'}})
+        source['filters'].append({'jaql': {'table': 'Unmapped', 'column': 'Status', 'title': 'Status'}})
+        source['widgets'] = [{'title': 'Status overview'}]
+        out, _, issues = migrate(source, {('A', 'Status'): ('A', 'Approval'), ('B', 'Status'): ('B', 'Outcome')})
+        self.assertEqual([f['jaql']['title'] for f in out['filters']], ['Approval', 'Outcome', 'Status'])
+        self.assertEqual(out['widgets'][0]['title'], 'Status overview')
+        self.assertTrue(any('Ambiguous title' in i['message'] for i in issues))
+
+    def test_title_split_table_names_require_field_context(self):
+        source = dashboard({'table': 'Legacy', 'column': 'Fall', 'tableTitle': 'Legacy'})
+        source['widgets'] = [{'title': 'Legacy overview'}]
+        out, _, issues = migrate(source, {('Legacy', 'Fall'): ('Fall Data', 'Fall'),
+                                         ('Legacy', 'Wound'): ('Wound Data', 'Wound')})
+        self.assertEqual(out['filters'][0]['jaql']['tableTitle'], 'Fall Data')
+        self.assertEqual(out['widgets'][0]['title'], 'Legacy overview')
+        self.assertTrue(issues)
+
+    def test_title_literal_punctuation_boundaries_and_case(self):
+        source = dashboard({'table': 'T', 'column': 'Risk (A+B)?', 'title': 'risk (a+b)? overview'})
+        source['widgets'] = [{'title': 'Risks / Risky / Risk overview'}]
+        out, _, issues = migrate(source, {('T', 'Risk (A+B)?'): ('T', 'Risk type'), ('T', 'Risk'): ('T', 'Hazard')})
+        self.assertEqual(out['filters'][0]['jaql']['title'], 'Risk type overview')
+        self.assertEqual(out['widgets'][0]['title'], 'Risks / Risky / Hazard overview')
+        self.assertFalse(issues)
+
+    def test_title_destination_containing_source_is_stable(self):
+        source = dashboard({'table': 'T', 'column': 'Risk', 'title': 'Risk and Risk category'})
+        source['widgets'] = [{'title': 'Risk category by month'}]
+        rules = {('T', 'Risk'): ('T', 'Risk category')}
+        out, _, issues = migrate(source, rules)
+        self.assertEqual(out['filters'][0]['jaql']['title'], 'Risk category and Risk category')
+        self.assertEqual(out['widgets'][0]['title'], 'Risk category by month')
+        self.assertFalse(migrate(out, rules)[1])
+        self.assertFalse(issues)
+
+    def test_title_rules_do_not_rewrite_member_objects_scripts_or_custom_labels(self):
+        source = dashboard({'table': 'T', 'column': 'Old Name', 'title': 'My custom label',
+                            'filter': {'members': [{'title': 'Old Name'}]}})
+        source['script'] = 'Old Name'
+        out, _, _ = migrate(source, {('T', 'Old Name'): ('T', 'New Name')})
+        self.assertEqual(out['filters'][0]['jaql']['title'], 'My custom label')
+        self.assertEqual(out['filters'][0]['jaql']['filter']['members'], [{'title': 'Old Name'}])
+        self.assertEqual(out['script'], 'Old Name')
+
+    def test_free_title_source_destination_collision_is_flagged(self):
+        source = dashboard({'table': 'T', 'column': 'First'})
+        source['widgets'] = [{'title': 'Second overview'}]
+        out, _, issues = migrate(source, {('T', 'First'): ('T', 'Second'),
+                                         ('U', 'Second'): ('U', 'Third')})
+        self.assertEqual(out['widgets'][0]['title'], 'Second overview')
+        self.assertTrue(issues)
+
     def test_move_and_rename_everywhere_preserving_labels_and_ids(self):
         source = dashboard({'table': 'Old', 'column': 'A', 'dim': '[Old.A]',
                             'columnTitle': 'A', 'tableTitle': 'Old', 'title': 'Custom label'})

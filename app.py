@@ -84,7 +84,7 @@ with st.expander('Discover fields in uploaded dashboards'):
         st.download_button('Download inventory', csv_bytes(st.session_state.inventory, ['Dashboard', 'Old table', 'Old column', 'References']), 'field-inventory.csv')
 
 st.subheader('2. Field mappings')
-st.caption('Exact Sisense table/column names. Every matching reference is migrated, including nested JAQL, filters, field IDs and formula dimension tokens. Custom display titles are retained.')
+st.caption('Exact Sisense table/column names. Matching references and mentions of old names in titles are updated, including widget/filter titles and table field headings. Unrelated custom wording is retained; ambiguous title matches are flagged for review.')
 fields = records(st.data_editor(frame(st.session_state.fields, FIELD_COLUMNS), num_rows='dynamic', width='stretch', key=f'fields_{st.session_state.revision}'))
 st.subheader('3. Automatic boolean conversion')
 st.write('No boolean mapping list is needed. The app detects Yes/No, True/False strings and JSON true/false members in JAQL filters, including dashboard, widget and nested filters. Yes/True becomes "1", No/False becomes "0", and matching field references become text.')
@@ -97,7 +97,7 @@ st.download_button('Save mapping library', json.dumps(config, indent=2), 'mappin
 
 fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode() + b''.join(name.encode() + hashlib.sha256(raw).digest() for name, raw in files)).hexdigest()
 st.subheader('4. Preview and download')
-st.caption('IDs, layout and scripts are preserved. Unrecognised filter conditions and references in scripts are flagged for review. The app does not upload dashboards to Sisense.')
+st.caption('IDs, layout and scripts are preserved. Title changes appear in the change log. Ambiguous titles, unrecognised filter conditions and references in scripts are flagged for review. The app does not upload dashboards to Sisense.')
 if st.button('Preview migration', type='primary', disabled=not files):
     try:
         mappings, boolean_rules = rules_from_rows(fields, bools)
@@ -146,7 +146,9 @@ elif preview:
     counts = {s: sum(r['status'] == s for r in results) for s in ['Ready', 'Review', 'Unchanged', 'Invalid']}
     for col, (label, value) in zip(st.columns(4), counts.items()):
         col.metric(label, value)
-    st.dataframe([{'Dashboard': r['name'], 'Status': r['status'], 'Changes': len(r['changes']), 'Review items': len(r['issues'])} for r in results], width='stretch')
+    st.dataframe([{'Dashboard': r['name'], 'Status': r['status'], 'Changes': len(r['changes']),
+                   'Title changes': sum(c['reason'] == 'title mapping' for c in r['changes']),
+                   'Review items': len(r['issues'])} for r in results], width='stretch')
     selected = st.selectbox('Inspect a dashboard', range(len(results)), format_func=lambda i: results[i]['name'])
     r = results[selected]
     changes_tab, issues_tab, json_tab = st.tabs(['Changes', 'Review items', 'Migrated JSON'])

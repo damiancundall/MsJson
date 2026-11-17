@@ -33,7 +33,13 @@ TEST_Fact_Form_CustomEventsCube,Wound Reason,Wound Data,Wound Reason
 TEST_Fact_Form_CustomEventsCube,Wound Type,Wound Data,Wound Type
 ```
 
-Match the exact names exposed by the Sisense datasource, including case and spaces. Mapping is by table AND column. Matching JAQL `table`, `column`, `tableTitle`, `dim`, associated `field.id` and `colorDim` are updated. `columnTitle` is renamed only if it equals the old column; custom labels are preserved. Exact bracketed dimension tokens inside `formula` properties are updated in a single pass. IDs, layouts, scripts and custom titles are preserved. Conflicting and chained/cyclic mappings are rejected so a rerun cannot silently move fields again.
+Match the exact names exposed by the Sisense datasource, including case and spaces. Mapping is by table AND column. Matching JAQL `table`, `column`, `dim`, associated `field.id` and `colorDim` are updated. Exact bracketed dimension tokens inside `formula` properties are updated in a single pass. IDs, layouts and scripts are preserved. Conflicting and chained/cyclic mappings are rejected so a rerun cannot silently move fields again.
+
+### Titles and displayed field names
+
+The same mapping automatically updates mentions of the old field/table name in `title`, `columnTitle` and `tableTitle`, including widget and dashboard titles, widget/dashboard filter labels and table/pivot field headings. Whole-name matching ignores display-text case and treats punctuation literally. Surrounding custom wording stays intact: `Count of Old Question` becomes `Count of New Question`. Member values in filters are not renamed by title rules.
+
+Field-bound labels use their own original table/column identity. Free widget/dashboard titles use names whose destinations are unambiguous across the mapping library. If the same old name points to multiple new names, the app leaves that mention unchanged and flags it for review. Destination phrases are protected to avoid repeated additions when a new label contains its old name. Preview shows a Title changes count, and every changed label has a `title mapping` entry with its JSON path and before/after text in the report.
 
 ## Boolean-to-string rules
 

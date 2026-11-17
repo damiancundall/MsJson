@@ -5,6 +5,7 @@ import copy
 import csv
 import io
 import json
+import re
 from pathlib import PurePosixPath
 import zipfile
 
@@ -166,6 +167,8 @@ def migrate(data, mappings, bools=None, auto_booleans=True):
     changes, issues = [], []
     tokens = {dimension(k): dimension(v) for k, v in mappings.items() if k != v}
     bool_tokens = {dimension(k): k for k in bools}
+    identity_by_dim = {dimension(k): k for k in mappings}
+    title_rules_cache = {}
 
     def issue(path, message):
         entry = {'path': path or '/', 'message': message}
@@ -190,6 +193,57 @@ def migrate(data, mappings, bools=None, auto_booleans=True):
             pieces.extend([value[pos:at], tokens[old]])
             pos = at + len(old)
         return ''.join(pieces)
+
+    def rewrite_title(value, kind, context, path):
+        """Replace whole field/table names in labels, using original identities.
+
+        Field-bound labels use only their own rule. Free widget/dashboard titles
+        can use globally unambiguous names. Destination phrases are protected so
+        e.g. 'Risk' -> 'Risk category' cannot grow on a subsequent run.
+        """
+        cache_key = (context, kind)
+        if cache_key not in title_rules_cache:
+            rules = mappings if context is None else ({context: mappings[context]} if context in mappings else {})
+            choices = {}
+            def add(old, new):
+                if old:
+                    choices.setdefault(old.casefold(), [old, set()])[1].add(new)
+            for old, new in rules.items():
+                if kind != 'columnTitle':
+                    add(old[0], new[0])
+                if kind != 'tableTitle':
+                    add(old[1], new[1])
+                if kind == 'title':
+                    add(dimension(old), dimension(new))
+                    add(f'{old[0]}.{old[1]}', f'{new[0]}.{new[1]}')
+            # Only changed names need matching; unchanged entries still help
+            # establish ambiguity when the same source label has two meanings.
+            active = {k: v for k, v in choices.items() if any(n != v[0] for n in v[1])}
+            if context is None:
+                destinations = {n.casefold() for _, values in choices.values() for n in values}
+                for name in active.keys() & destinations:
+                    # Without a field identity this may already be another
+                    # rule's output. Flag rather than chain a title migration.
+                    active[name][1].add(active[name][0])
+            protected = {n.casefold(): n for _, values in choices.values() for n in values
+                         if n.casefold() not in active}
+            names = [v[0] for v in active.values()] + list(protected.values())
+            expression = '|'.join(re.escape(n) for n in sorted(set(names), key=len, reverse=True))
+            pattern = re.compile(r'(?<!\w)(?:' + expression + r')(?!\w)', re.IGNORECASE) if expression else None
+            title_rules_cache[cache_key] = (active, protected, pattern)
+        choices, protected, pattern = title_rules_cache[cache_key]
+        if pattern is None:
+            return value
+        def replacement(match):
+            key = match.group().casefold()
+            if key in protected:
+                return match.group()
+            options = choices[key][1]
+            if len(options) != 1:
+                issue(path, f'Ambiguous title name {match.group()!r}; multiple field mappings give different titles. Left unchanged.')
+                return match.group()
+            return next(iter(options))
+        return pattern.sub(replacement, value)
 
     def convert_member(value, rule, path):
         yes, no = rule
@@ -235,18 +289,25 @@ def migrate(data, mappings, bools=None, auto_booleans=True):
             for i, value in enumerate(node):
                 convert_filter(value, rule, path + '/' + str(i))
 
-    def walk(original, node, path=''):
+    def walk(original, node, path='', context=None, member_value=False):
         if isinstance(original, dict):
             identity = (original.get('table'), original.get('column'))
+            if all(isinstance(v, str) for v in identity):
+                context = identity
+            elif isinstance(original.get('jaql'), dict):
+                linked = original['jaql']
+                if isinstance(linked.get('table'), str) and isinstance(linked.get('column'), str):
+                    context = (linked['table'], linked['column'])
+            elif (isinstance(original.get('field'), dict) and isinstance(original['field'].get('id'), str)
+                  and original['field']['id'] in identity_by_dim):
+                context = identity_by_dim[original['field']['id']]
+            elif isinstance(original.get('id'), str) and original['id'] in identity_by_dim:
+                context = identity_by_dim[original['id']]
             if all(isinstance(v, str) for v in identity):
                 if identity in mappings:
                     dest = mappings[identity]
                     set_value(node, 'table', dest[0], path, 'field mapping')
                     set_value(node, 'column', dest[1], path, 'field mapping')
-                    if 'tableTitle' in original:
-                        set_value(node, 'tableTitle', dest[0], path, 'field mapping')
-                    if original.get('columnTitle') == identity[1]:
-                        set_value(node, 'columnTitle', dest[1], path, 'field mapping')
                     if original.get('dim') not in (None, dimension(identity)):
                         issue(path + '/dim', 'Dimension differs from table/column identity; review required.')
                 if identity in bools:
@@ -258,7 +319,9 @@ def migrate(data, mappings, bools=None, auto_booleans=True):
             for key, value in original.items():
                 p = path + '/' + str(key)
                 if isinstance(value, str):
-                    if key in ('dim', 'id', 'colorDim', 'formula'):
+                    if key in ('title', 'columnTitle', 'tableTitle') and not member_value:
+                        set_value(node, key, rewrite_title(value, key, context, p), path, 'title mapping')
+                    elif key in ('dim', 'id', 'colorDim', 'formula'):
                         # Identifiers must be exact. Formula text may contain multiple bracketed identifiers.
                         new = token_replace(value) if key == 'formula' else tokens.get(value, value)
                         set_value(node, key, new, path, 'field identifier mapping')
@@ -269,9 +332,9 @@ def migrate(data, mappings, bools=None, auto_booleans=True):
                         issue(p, f'Field reference in unsupported string property {key}; left unchanged.')
                 elif key == 'filter' and identity in bools:
                     # Values were converted above. Still walk original nested JAQL objects independently.
-                    walk(value, node[key], p)
+                    walk(value, node[key], p, context, member_value)
                 else:
-                    walk(value, node[key], p)
+                    walk(value, node[key], p, context, member_value or key in ('members', 'equals', 'doesntEqual'))
             # Some exports store a filter as a sibling of JAQL rather than inside it.
             jaql = original.get('jaql')
             if isinstance(jaql, dict) and isinstance(original.get('filter'), (dict, list)):
@@ -280,7 +343,7 @@ def migrate(data, mappings, bools=None, auto_booleans=True):
                     convert_filter(node['filter'], bools[key], path + '/filter')
         elif isinstance(original, list):
             for i, value in enumerate(original):
-                walk(value, node[i], path + '/' + str(i))
+                walk(value, node[i], path + '/' + str(i), context, member_value)
 
     walk(data, out)
     # Logical JSON round-trip validation; scripts and formula logic are never executed.
